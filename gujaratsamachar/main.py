@@ -18,7 +18,26 @@ app = Flask(__name__)
 
 # Configuration
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash"
+
+# Log incoming requests immediately and completion after response
+@app.before_request
+def _log_request_start():
+    try:
+        args = dict(request.args)
+    except Exception:
+        args = {}
+    print(f"[REQ START] {request.remote_addr} {request.method} {request.path} args={args}", flush=True)
+
+
+@app.after_request
+def _log_request_end(response):
+    try:
+        status = response.status
+    except Exception:
+        status = "<unknown>"
+    print(f"[REQ END]   {request.remote_addr} {request.method} {request.path} -> {status}", flush=True)
+    return response
 
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
@@ -372,4 +391,4 @@ def server_error(e):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=True)
