@@ -1,394 +1,225 @@
-from flask import Flask, jsonify, request
-import requests
-from PIL import Image
-from io import BytesIO
-import pandas as pd
-import numpy as np
-import re
-import json
-import google.generativeai as genai
-from bs4 import BeautifulSoup
-import warnings
-from datetime import datetime
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+import uuid
 import os
+from datetime import datetime
+import time
+import psutil
+import logging
+from scraper import process_gujarat_samachar
 
-warnings.filterwarnings('ignore')
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+app = FastAPI(
+    title="Newspaper Scraper API",
+    description="API for scraping Gujarati newspaper e-papers",
+    version="1.0.0"
+)
 
-# Configuration
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-GEMINI_MODEL = "gemini-2.0-flash"
+# In-memory task storage
+task_store: Dict[str, Dict[str, Any]] = {}
+MAX_TASKS = 10  # Limit stored tasks to prevent memory issues
 
-# Log incoming requests immediately and completion after response
-@app.before_request
-def _log_request_start():
+class ScrapeRequest(BaseModel):
+    date: Optional[str] = None
+    editions: List[str] = ["ahmedabad"]
+    max_pages: int = 5  # Reduced for free tier
+
+class TaskStatus(BaseModel):
+    task_id: str
+    status: str
+    message: Optional[str] = None
+    progress: Optional[Dict[str, Any]] = None
+    result: Optional[List[Dict[str, Any]]] = None
+    error: Optional[str] = None
+    created_at: str
+    completed_at: Optional[str] = None
+
+def get_today_date() -> str:
+    """Return today's date in dd-mm-yyyy format"""
+    return datetime.now().strftime("%d-%m-%Y")
+
+def check_memory_usage() -> float:
+    """Check current memory usage in MB"""
     try:
-        args = dict(request.args)
-    except Exception:
-        args = {}
-    print(f"[REQ START] {request.remote_addr} {request.method} {request.path} args={args}", flush=True)
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / 1024 / 1024
+    except:
+        return 0
 
+def cleanup_old_tasks():
+    """Remove old tasks to prevent memory buildup"""
+    if len(task_store) > MAX_TASKS:
+        # Remove oldest tasks
+        oldest_tasks = sorted(task_store.items(), key=lambda x: x[1]['created_at'])[:len(task_store) - MAX_TASKS]
+        for task_id, _ in oldest_tasks:
+            del task_store[task_id]
+        logger.info(f"Cleaned up {len(oldest_tasks)} old tasks")
 
-@app.after_request
-def _log_request_end(response):
-    try:
-        status = response.status
-    except Exception:
-        status = "<unknown>"
-    print(f"[REQ END]   {request.remote_addr} {request.method} {request.path} -> {status}", flush=True)
-    return response
-
-if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
-
-# List of available editions
-AVAILABLE_EDITIONS = [
-    "ahmedabad",
-    "baroda",
-    "surat",
-    "rajkot-saurashtra",
-    "bhavnagar",
-    "bhuj",
-    "rajkot-city",
-    "kheda-anand",
-    "gandhinagar",
-    "mehsana",
-    "sabarkantha",
-    "surendranagar",
-    "bharuch-panchmahal",
-    "vapi-valsad",
-    "bhavnagar-local",
-    "patan",
-    "banaskantha",
-    "junagadh",
-]
-
-
-def load_image(image_path_or_url: str) -> Image.Image:
-    """Load an image from URL or local path and return PIL Image."""
-    if image_path_or_url.startswith("http"):
-        resp = requests.get(image_path_or_url, timeout=60)
-        resp.raise_for_status()
-        return Image.open(BytesIO(resp.content)).convert("RGB")
-    return Image.open(image_path_or_url).convert("RGB")
-
-
-def extract_articles_with_gemini(image: Image.Image) -> list:
-    """Send the page image to Gemini and ask for Gujarati headline/content pairs."""
-    if not GOOGLE_API_KEY:
-        return []
-
-    prompt = (
-        "You are an expert Gujarati news analyst. Given a full-page Gujarati newspaper image, "
-        "visually read the ENTIRE page and identify ALL distinct news articles (ignore advertisements, page headers/footers, and tiny blurbs). "
-        "For each real article, return the following in Gujarati where applicable: \n"
-        "- headline: concise Gujarati headline \n"
-        "- content: short Gujarati summary(40-50 words)\n"
-        "- city: the city/location mentioned for the article (Gujarati). If none is visible, return \"\".\n"
-        "- district: the district for that city/location (Gujarati). If uncertain, infer reasonably; else return \"\".\n"
-        "- sentiment: one of these Gujarati labels based on article tone: \"સકારાત્મક\" (positive), \"તટસ્થ\" (neutral), or \"નકારાત્મક\" (negative).\n"
-        "Output only valid JSON with EXACT schema: {\"articles\":[{\"headline\":\"...\",\"content\":\"...\",\"city\":\"...\",\"district\":\"...\",\"sentiment\":\"સકારાત્મક|તટસ્થ|નકારાત્મક\"}, ...]}"
-    )
-
-    model = genai.GenerativeModel(GEMINI_MODEL)
-    try:
-        resp = model.generate_content([prompt, image])
-        out_text = getattr(resp, "text", "")
-        if not out_text:
-            return []
-
-        # Extract JSON
-        m = re.search(r"\{.*\}", out_text, re.DOTALL)
-        if m:
-            out_text = m.group(0)
-        data = json.loads(out_text)
-        articles = data.get("articles", [])
-        
-        # Normalize
-        norm = []
-        for a in articles:
-            h = str(a.get("headline", "")).strip()
-            c = str(a.get("content", "")).strip()
-            city = str(a.get("city", "")).strip()
-            district = str(a.get("district", "")).strip()
-            sentiment = str(a.get("sentiment", "")).strip()
-            if h or c:
-                norm.append({
-                    "headline": h,
-                    "content": c,
-                    "city": city,
-                    "district": district,
-                    "sentiment": sentiment
-                })
-        return norm
-    except Exception as e:
-        print(f"Gemini error: {e}")
-        return []
-
-
-def get_image_url_from_page(page_url: str) -> str:
-    """Fetch the epaper page and extract the main image URL."""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        resp = requests.get(page_url, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            return None
-        
-        soup = BeautifulSoup(resp.text, "html.parser")
-        img = soup.select_one("img.epaper_page")
-        if not img:
-            img = soup.select_one(".rendered_img img")
-        if not img:
-            img = soup.select_one(".mw-100 img")
-        if img and img.get("src"):
-            return img["src"].strip()
-        return None
-    except Exception as e:
-        print(f"Error fetching image URL from {page_url}: {e}")
-        return None
-
-
-def process_edition(edition: str, date_str: str, max_pages: int = 18) -> dict:
-    """Process a single edition for a given date."""
-    base_url = f"https://epaper.gujaratsamachar.com/{edition}/{date_str}"
-    rows = []
-    pages_processed = 0
-    errors = []
-
-    for page_num in range(1, max_pages + 1):
-        page_url = f"{base_url}/{page_num}"
-        img_url = get_image_url_from_page(page_url)
-        
-        if not img_url:
-            if page_num == 1:
-                errors.append(f"No image found for page 1 of {edition}")
-            break
-
-        try:
-            image = load_image(img_url)
-        except Exception as e:
-            errors.append(f"Failed to load image for {edition} page {page_num}: {str(e)}")
-            continue
-
-        articles = extract_articles_with_gemini(image)
-        
-        for a in articles:
-            rows.append({
-                "date": date_str,
-                "page_number": page_num,
-                "edition": edition,
-                "city": a.get("city", "").strip(),
-                "district": a.get("district", "").strip(),
-                "media_link": img_url,
-                "newspaper_name": "Gujarat Samachar",
-                "headline": a.get("headline", "").strip(),
-                "content": a.get("content", "").strip(),
-                "sentiment": a.get("sentiment", "").strip(),
-            })
-        
-        pages_processed += 1
-
+@app.get("/")
+async def root():
     return {
-        "edition": edition,
-        "date": date_str,
-        "pages_processed": pages_processed,
-        "articles_count": len(rows),
-        "data": rows,
-        "errors": errors
+        "message": "Newspaper Scraper API",
+        "status": "active",
+        "memory_usage": f"{check_memory_usage():.1f} MB"
     }
 
-
-@app.route('/')
-def home():
-    """Home route with API documentation."""
-    return jsonify({
-        "service": "Gujarat Samachar E-paper Scraper API",
-        "version": "1.0",
-        "endpoints": {
-            "/scrape/all": {
-                "method": "GET",
-                "description": "Scrape all editions for a specific date",
-                "parameters": {
-                    "date": "Date in dd-mm-yyyy format (required)",
-                    "max_pages": "Maximum pages to scrape per edition (optional, default: 18)"
-                },
-                "example": "/scrape/all?date=15-09-2025"
-            },
-            "/scrape/edition": {
-                "method": "GET",
-                "description": "Scrape a specific edition for a specific date",
-                "parameters": {
-                    "edition": "Edition name (required)",
-                    "date": "Date in dd-mm-yyyy format (required)",
-                    "max_pages": "Maximum pages to scrape (optional, default: 18)"
-                },
-                "example": "/scrape/edition?edition=surat&date=15-09-2025"
-            },
-            "/editions": {
-                "method": "GET",
-                "description": "Get list of available editions"
-            }
-        },
-        "available_editions": AVAILABLE_EDITIONS
-    })
-
-
-@app.route('/editions')
-def get_editions():
-    """Get list of available editions."""
-    return jsonify({
-        "editions": AVAILABLE_EDITIONS,
-        "count": len(AVAILABLE_EDITIONS)
-    })
-
-
-@app.route('/scrape/edition')
-def scrape_single_edition():
-    """Scrape a specific edition for a particular date."""
-    edition = request.args.get('edition')
-    date_str = request.args.get('date')
-    max_pages = int(request.args.get('max_pages', 18))
-
-    # Validation
-    if not edition:
-        return jsonify({"error": "Missing required parameter: edition"}), 400
-    
-    if not date_str:
-        return jsonify({"error": "Missing required parameter: date"}), 400
-    
-    if edition not in AVAILABLE_EDITIONS:
-        return jsonify({
-            "error": f"Invalid edition: {edition}",
-            "available_editions": AVAILABLE_EDITIONS
-        }), 400
-    
-    # Validate date format
-    try:
-        datetime.strptime(date_str, "%d-%m-%Y")
-    except ValueError:
-        return jsonify({"error": "Invalid date format. Use dd-mm-yyyy"}), 400
-
-    try:
-        result = process_edition(edition, date_str, max_pages)
-        
-        if not result["data"]:
-            return jsonify({
-                "success": False,
-                "message": "No articles found",
-                "result": result
-            }), 404
-        
-        return jsonify({
-            "success": True,
-            "edition": edition,
-            "date": date_str,
-            "pages_processed": result["pages_processed"],
-            "articles_count": result["articles_count"],
-            "data": result["data"],
-            "errors": result["errors"] if result["errors"] else None
-        })
-    
-    except Exception as e:
-        return jsonify({
-            "error": f"Processing failed: {str(e)}",
-            "edition": edition,
-            "date": date_str
-        }), 500
-
-
-@app.route('/scrape/all')
-def scrape_all_editions():
-    """Scrape all editions for a particular date."""
-    date_str = request.args.get('date')
-    max_pages = int(request.args.get('max_pages', 18))
-    
-    # Validation
-    if not date_str:
-        return jsonify({"error": "Missing required parameter: date"}), 400
-    
-    # Validate date format
-    try:
-        datetime.strptime(date_str, "%d-%m-%Y")
-    except ValueError:
-        return jsonify({"error": "Invalid date format. Use dd-mm-yyyy"}), 400
-
-    all_results = []
-    all_data = []
-    successful_editions = []
-    failed_editions = []
-    total_articles = 0
-    
-    for edition in AVAILABLE_EDITIONS:
-        try:
-            result = process_edition(edition, date_str, max_pages)
-            
-            if result["data"]:
-                all_data.extend(result["data"])
-                successful_editions.append(edition)
-                total_articles += result["articles_count"]
-                all_results.append({
-                    "edition": edition,
-                    "status": "success",
-                    "articles_count": result["articles_count"],
-                    "pages_processed": result["pages_processed"]
-                })
-            else:
-                failed_editions.append(edition)
-                all_results.append({
-                    "edition": edition,
-                    "status": "no_data",
-                    "articles_count": 0,
-                    "errors": result["errors"]
-                })
-        
-        except Exception as e:
-            failed_editions.append(edition)
-            all_results.append({
-                "edition": edition,
-                "status": "error",
-                "error": str(e)
-            })
-    
-    return jsonify({
-        "success": len(successful_editions) > 0,
-        "date": date_str,
-        "summary": {
-            "total_editions_processed": len(AVAILABLE_EDITIONS),
-            "successful_editions": len(successful_editions),
-            "failed_editions": len(failed_editions),
-            "total_articles": total_articles
-        },
-        "editions_status": all_results,
-        "successful_editions": successful_editions,
-        "failed_editions": failed_editions if failed_editions else None,
-        "data": all_data if all_data else None
-    })
-
-
-@app.route('/health')
-def health_check():
-    """Health check endpoint for monitoring."""
-    return jsonify({
+@app.get("/health")
+async def health_check():
+    return {
         "status": "healthy",
-        "service": "Gujarat Samachar Scraper",
-        "gemini_configured": bool(GOOGLE_API_KEY)
-    })
+        "timestamp": datetime.now().isoformat(),
+        "memory_usage_mb": check_memory_usage()
+    }
 
+@app.post("/scrape/gujarat-samachar", response_model=TaskStatus)
+async def scrape_gujarat_samachar_endpoint(request: ScrapeRequest, background_tasks: BackgroundTasks):
+    # Check memory before starting
+    memory_usage = check_memory_usage()
+    if memory_usage > 400:  # 400MB threshold for 512MB RAM
+        raise HTTPException(status_code=429, detail="Server memory usage too high")
+    
+    # Generate task ID
+    task_id = str(uuid.uuid4())
+    date_str = request.date or get_today_date()
+    
+    # Validate editions
+    if not request.editions:
+        raise HTTPException(status_code=400, detail="At least one edition is required")
+    
+    # Limit editions for free tier
+    if len(request.editions) > 3:
+        request.editions = request.editions[:3]
+        logger.warning(f"Limited to 3 editions due to resource constraints")
+    
+    # Limit pages for free tier
+    if request.max_pages > 10:
+        request.max_pages = 10
+        logger.warning(f"Limited to 10 pages per edition due to resource constraints")
+    
+    # Store initial task status
+    task_store[task_id] = {
+        "status": "processing",
+        "message": f"Scraping started for {len(request.editions)} editions",
+        "progress": {
+            "editions_total": len(request.editions),
+            "editions_completed": 0,
+            "articles_extracted": 0
+        },
+        "created_at": datetime.now().isoformat(),
+        "params": {
+            "date": date_str,
+            "editions": request.editions,
+            "max_pages": request.max_pages
+        }
+    }
+    
+    # Clean up old tasks
+    cleanup_old_tasks()
+    
+    # Add background task
+    background_tasks.add_task(
+        process_scraping_task,
+        task_id,
+        request.editions,
+        date_str,
+        request.max_pages
+    )
+    
+    return TaskStatus(
+        task_id=task_id,
+        status="started",
+        message=f"Scraping started for {len(request.editions)} editions on {date_str}",
+        created_at=task_store[task_id]["created_at"]
+    )
 
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({"error": "Endpoint not found"}), 404
+@app.get("/status/{task_id}", response_model=TaskStatus)
+async def get_task_status(task_id: str):
+    if task_id not in task_store:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task_data = task_store[task_id]
+    return TaskStatus(
+        task_id=task_id,
+        status=task_data["status"],
+        message=task_data.get("message"),
+        progress=task_data.get("progress"),
+        result=task_data.get("result"),
+        error=task_data.get("error"),
+        created_at=task_data["created_at"],
+        completed_at=task_data.get("completed_at")
+    )
 
+@app.get("/tasks")
+async def list_tasks():
+    """List all active tasks"""
+    return {
+        "total_tasks": len(task_store),
+        "tasks": [
+            {
+                "task_id": task_id,
+                "status": data["status"],
+                "created_at": data["created_at"]
+            }
+            for task_id, data in task_store.items()
+        ]
+    }
 
-@app.errorhandler(500)
-def server_error(e):
-    return jsonify({"error": "Internal server error"}), 500
+def process_scraping_task(task_id: str, editions: List[str], date_str: str, max_pages: int):
+    """Background task to process scraping"""
+    try:
+        logger.info(f"Starting background task {task_id}")
+        
+        # Update progress
+        task_store[task_id]["progress"]["started_at"] = datetime.now().isoformat()
+        
+        # Process the scraping
+        df = process_gujarat_samachar(date_str, editions, max_pages)
+        
+        if df is not None:
+            result = df.to_dict(orient='records')
+            articles_count = len(result)
+        else:
+            result = []
+            articles_count = 0
+        
+        # Update task status
+        task_store[task_id].update({
+            "status": "completed",
+            "message": f"Scraping completed successfully",
+            "progress": {
+                "editions_total": len(editions),
+                "editions_completed": len(editions),
+                "articles_extracted": articles_count,
+                "memory_usage_mb": check_memory_usage()
+            },
+            "result": result,
+            "completed_at": datetime.now().isoformat()
+        })
+        
+        logger.info(f"Task {task_id} completed with {articles_count} articles")
+        
+    except Exception as e:
+        logger.error(f"Task {task_id} failed: {e}")
+        task_store[task_id].update({
+            "status": "failed",
+            "error": str(e),
+            "completed_at": datetime.now().isoformat()
+        })
 
+# Add startup event to check environment
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting Newspaper Scraper API")
+    logger.info(f"Memory usage: {check_memory_usage():.1f} MB")
+    
+    if not os.getenv("GOOGLE_API_KEY"):
+        logger.warning("GOOGLE_API_KEY environment variable not set!")
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
