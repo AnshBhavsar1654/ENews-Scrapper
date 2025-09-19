@@ -90,16 +90,6 @@ async def scrape_gujarat_samachar_endpoint(request: ScrapeRequest, background_ta
     if not request.editions:
         raise HTTPException(status_code=400, detail="At least one edition is required")
     
-    # Limit editions for free tier
-    if len(request.editions) > 3:
-        request.editions = request.editions[:3]
-        logger.warning(f"Limited to 3 editions due to resource constraints")
-    
-    # Limit pages for free tier
-    if request.max_pages > 10:
-        request.max_pages = 10
-        logger.warning(f"Limited to 10 pages per edition due to resource constraints")
-    
     # Store initial task status
     task_store[task_id] = {
         "status": "processing",
