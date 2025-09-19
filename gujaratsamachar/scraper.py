@@ -201,18 +201,27 @@ def process_edition(edition: str, date_str: str, max_pages: int = 5) -> List[dic
     all_articles = []
     base_url = f"https://epaper.gujaratsamachar.com/{edition}/{date_str}"
     
+    # Allow initial pages to be advertisements (zero articles) without stopping the edition
+    found_any_articles = False
     for page_num in range(1, max_pages + 1):
         page_url = f"{base_url}/{page_num}"
         articles = process_single_page(page_url, date_str, edition, page_num)
-        all_articles.extend(articles)
-        
-        # Stop if no articles found on page (likely end of newspaper)
-        if not articles:
-            logger.info(f"No articles on page {page_num}, stopping edition {edition}")
-            break
-            
-        # Small delay between pages
-        time.sleep(1)
+        if articles:
+            all_articles.extend(articles)
+            found_any_articles = True
+            # Small delay between pages
+            time.sleep(1)
+            continue
+
+        # If no articles on this page
+        if not found_any_articles:
+            # Likely an advertisement page at the front; skip and continue to next page
+            logger.info(f"No articles on page {page_num} (likely advertisement), continuing edition {edition}")
+            continue
+
+        # If we already found some articles earlier, a blank page likely means end of newspaper
+        logger.info(f"No articles on page {page_num} after content, stopping edition {edition}")
+        break
     
     logger.info(f"Completed edition {edition}: {len(all_articles)} articles")
     return all_articles
