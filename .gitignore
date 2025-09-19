@@ -1,0 +1,13 @@
+/sandesh/__pycache__/
+
+# Common Python ignores (deployment scope)
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments (if any placed here)
+.venv/
+venv/
+env/

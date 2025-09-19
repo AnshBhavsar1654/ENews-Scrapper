@@ -18,6 +18,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, WebDriverException
+from shutil import which
+try:
+    from webdriver_manager.chrome import ChromeDriverManager  # type: ignore
+    _HAS_WDM = True
+except Exception:
+    _HAS_WDM = False
 
 import google.generativeai as genai
 
@@ -26,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_API_KEY = "AIzaSyBWMBU7A-CdLoDoOdOD5tCLFayAW7sbvm8"
 GEMINI_MODEL = "gemini-2.0-flash"
 
 if GOOGLE_API_KEY:
@@ -164,12 +170,20 @@ def _fetch_image_urls_selenium(edition_slug: str, date_yyyy_mm_dd: str) -> List[
     url = f"https://sandesh.com/epaper/{edition_slug}?date={date_yyyy_mm_dd}"
     driver = None
     try:
-        # Resolve Chrome and Chromedriver paths (Render apt installs here)
-        chrome_bin = os.getenv("CHROME_BIN", "/usr/bin/chromium")
-        chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
+        # Resolve Chrome and Chromedriver paths
+        # On Render (Docker), set CHROME_BIN=/usr/bin/chromium; locally on Windows, leave unset
+        chrome_bin = os.getenv("CHROME_BIN")
+        chromedriver_env = os.getenv("CHROMEDRIVER_PATH")
+        # Determine chromedriver path:
+        # 1) Env var CHROMEDRIVER_PATH
+        # 2) In PATH
+        # 3) webdriver-manager (if installed)
+        chromedriver_path = chromedriver_env or which("chromedriver") or ""
 
         options = Options()
-        options.binary_location = chrome_bin
+        # Only set binary_location if explicitly provided (e.g., in Docker/Render)
+        if chrome_bin and os.path.exists(chrome_bin):
+            options.binary_location = chrome_bin
         # Headless/CI friendly flags
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
@@ -183,7 +197,17 @@ def _fetch_image_urls_selenium(edition_slug: str, date_yyyy_mm_dd: str) -> List[
         options.add_argument("--remote-debugging-port=9222")
         options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-        service = Service(executable_path=chromedriver_path)
+        if chromedriver_path and os.path.exists(chromedriver_path):
+            service = Service(executable_path=chromedriver_path)
+        elif chromedriver_path:  # found via PATH which()
+            service = Service(executable_path=chromedriver_path)
+        elif _HAS_WDM:
+            # Auto-download a compatible driver locally (great for Windows dev)
+            service = Service(ChromeDriverManager().install())
+        else:
+            raise WebDriverException(
+                "Chromedriver not found. Install chromedriver, set CHROMEDRIVER_PATH, or install webdriver-manager."
+            )
         driver = webdriver.Chrome(service=service, options=options)
         # Timeouts
         driver.set_page_load_timeout(120)
