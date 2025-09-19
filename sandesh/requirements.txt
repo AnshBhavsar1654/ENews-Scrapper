@@ -7,4 +7,5 @@ beautifulsoup4==4.12.2
 google-generativeai==0.3.2
 python-dotenv==1.0.0
 psutil==5.9.6
-selenium==4.24.0
+selenium==4.15.2
+webdriver-manager==4.0.1
