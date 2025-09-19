@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyBWMBU7A-CdLoDoOdOD5tCLFayAW7sbvm8")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GEMINI_MODEL = "gemini-2.0-flash"
 
 if GOOGLE_API_KEY:
