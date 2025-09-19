@@ -11,6 +11,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     libnss3 \
     libasound2 \
+    libcups2 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxss1 \
+    libxtst6 \
+    libxext6 \
+    libxfixes3 \
+    libxcb1 \
+    libxshmfence1 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libxkbcommon0 \
     ca-certificates \
     wget \
     unzip \
