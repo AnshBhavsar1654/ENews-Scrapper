@@ -193,6 +193,107 @@ async def startup_event():
     if not os.getenv("GOOGLE_API_KEY"):
         logger.warning("GOOGLE_API_KEY environment variable not set!")
 
+@app.get("/debug/chrome")
+async def debug_chrome():
+    """Debug endpoint to check Chrome and ChromeDriver availability"""
+    import subprocess
+    import os
+    
+    debug_info = {}
+    
+    # Check Chrome binary
+    chrome_bin = os.getenv("CHROME_BIN", "/usr/bin/google-chrome")
+    debug_info["chrome_bin_path"] = chrome_bin
+    debug_info["chrome_exists"] = os.path.exists(chrome_bin)
+    
+    if debug_info["chrome_exists"]:
+        try:
+            result = subprocess.run([chrome_bin, "--version"], 
+                                  capture_output=True, text=True, timeout=10)
+            debug_info["chrome_version"] = result.stdout.strip()
+        except Exception as e:
+            debug_info["chrome_version_error"] = str(e)
+    
+    # Check ChromeDriver
+    chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "/usr/local/bin/chromedriver")
+    debug_info["chromedriver_path"] = chromedriver_path
+    debug_info["chromedriver_exists"] = os.path.exists(chromedriver_path)
+    
+    if debug_info["chromedriver_exists"]:
+        try:
+            result = subprocess.run([chromedriver_path, "--version"], 
+                                  capture_output=True, text=True, timeout=10)
+            debug_info["chromedriver_version"] = result.stdout.strip()
+        except Exception as e:
+            debug_info["chromedriver_version_error"] = str(e)
+    
+    # Check environment
+    debug_info["environment"] = {
+        "DISPLAY": os.getenv("DISPLAY"),
+        "USER": os.getenv("USER"),
+        "HOME": os.getenv("HOME"),
+        "PATH": os.getenv("PATH")[:200] + "..." if os.getenv("PATH") else None
+    }
+    
+    # Test basic Chrome launch
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        
+        options = Options()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        
+        if debug_info["chrome_exists"]:
+            options.binary_location = chrome_bin
+            
+        service = Service(executable_path=chromedriver_path) if debug_info["chromedriver_exists"] else None
+        
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.get("https://httpbin.org/get")
+        title = driver.title
+        driver.quit()
+        
+        debug_info["test_navigation"] = f"Success - Page title: {title}"
+        
+    except Exception as e:
+        debug_info["test_navigation"] = f"Failed: {str(e)}"
+    
+    return debug_info
+
+
+@app.get("/debug/test-sandesh")
+async def debug_test_sandesh():
+    """Test Sandesh URL accessibility"""
+    import requests
+    from bs4 import BeautifulSoup
+    
+    test_url = "https://sandesh.com/epaper/ahmedabad?date=2025-01-19"
+    
+    try:
+        response = requests.get(test_url, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        })
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        return {
+            "url": test_url,
+            "status_code": response.status_code,
+            "content_length": len(response.text),
+            "title": soup.title.string if soup.title else "No title",
+            "images_found": len(soup.find_all('img')),
+            "carousel_elements": len(soup.select('.carousel-inner')),
+            "epaper_images": len(soup.select('img[src*="epaper"]')),
+            "page_snippet": response.text[:500]
+        }
+    except Exception as e:
+        return {
+            "url": test_url,
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn

@@ -170,91 +170,205 @@ def _fetch_image_urls_selenium(edition_slug: str, date_yyyy_mm_dd: str) -> List[
     url = f"https://sandesh.com/epaper/{edition_slug}?date={date_yyyy_mm_dd}"
     driver = None
     try:
-        # Resolve Chrome and Chromedriver paths
-        # On Render (Docker), set CHROME_BIN=/usr/bin/chromium; locally on Windows, leave unset
-        chrome_bin = os.getenv("CHROME_BIN")
-        chromedriver_env = os.getenv("CHROMEDRIVER_PATH")
-        # Determine chromedriver path:
-        # 1) Env var CHROMEDRIVER_PATH
-        # 2) In PATH
-        # 3) webdriver-manager (if installed)
-        chromedriver_path = chromedriver_env or which("chromedriver") or ""
-
+        # Chrome binary and driver paths
+        chrome_bin = os.getenv("CHROME_BIN", "/usr/bin/google-chrome")
+        chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "/usr/local/bin/chromedriver")
+        
+        logger.info(f"Using Chrome: {chrome_bin}")
+        logger.info(f"Using ChromeDriver: {chromedriver_path}")
+        
         options = Options()
-        # Only set binary_location if explicitly provided (e.g., in Docker/Render)
-        if chrome_bin and os.path.exists(chrome_bin):
+        
+        # Set binary location if it exists
+        if os.path.exists(chrome_bin):
             options.binary_location = chrome_bin
-        # Headless/CI friendly flags
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--disable-software-rasterizer")
-        options.add_argument("--disable-features=VizDisplayCompositor")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-infobars")
-        options.add_argument("--remote-debugging-port=9222")
-        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        
+        # Comprehensive Chrome arguments for cloud deployment
+        chrome_args = [
+            "--headless=new",
+            "--no-sandbox", 
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-features=VizDisplayCompositor",
+            "--disable-extensions",
+            "--disable-plugins",
+            "--disable-images",  # Speed up loading by not loading images in DOM
+            "--disable-javascript",  # If the content is in static HTML
+            "--disable-default-apps",
+            "--disable-sync",
+            "--disable-translate",
+            "--hide-scrollbars",
+            "--metrics-recording-only",
+            "--mute-audio",
+            "--no-first-run",
+            "--safebrowsing-disable-auto-update",
+            "--disable-ipc-flooding-protection",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-field-trial-config",
+            "--disable-back-forward-cache",
+            "--disable-hang-monitor",
+            "--disable-prompt-on-repost",
+            "--disable-client-side-phishing-detection",
+            "--disable-component-extensions-with-background-pages",
+            "--disable-default-apps",
+            "--disable-extensions-http-throttling",
+            "--disable-background-networking",
+            "--window-size=1920,1080",
+            "--start-maximized",
+            "--remote-debugging-port=9222",
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "--single-process",  # Use single process to reduce memory usage
+            "--memory-pressure-off",
+            "--max_old_space_size=4096",
+            "--disable-web-security",  # Only if needed for CORS
+            "--disable-features=TranslateUI",
+            "--disable-features=BlinkGenPropertyTrees",
+            "--disable-features=VizHitTestSurfaceLayer"
+        ]
+        
+        for arg in chrome_args:
+            options.add_argument(arg)
+            
+        # Additional preferences for stability
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
+        options.add_experimental_option("prefs", {
+            "profile.default_content_setting_values.notifications": 2,
+            "profile.default_content_settings.popups": 0,
+            "profile.managed_default_content_settings.images": 2,
+        })
 
-        if chromedriver_path and os.path.exists(chromedriver_path):
-            service = Service(executable_path=chromedriver_path)
-        elif chromedriver_path:  # found via PATH which()
+        # Create service
+        if os.path.exists(chromedriver_path):
             service = Service(executable_path=chromedriver_path)
         elif _HAS_WDM:
-            # Auto-download a compatible driver locally (great for Windows dev)
+            logger.info("Using WebDriverManager to install ChromeDriver")
             service = Service(ChromeDriverManager().install())
         else:
             raise WebDriverException(
-                "Chromedriver not found. Install chromedriver, set CHROMEDRIVER_PATH, or install webdriver-manager."
+                f"ChromeDriver not found at {chromedriver_path}. Install it or set CHROMEDRIVER_PATH."
             )
+
+        # Create driver with extended timeouts
         driver = webdriver.Chrome(service=service, options=options)
-        # Timeouts
-        driver.set_page_load_timeout(120)
-        driver.set_script_timeout(60)
-
-        # Load page
-        try:
-            driver.get(url)
-        except TimeoutException:
-            # Stop loading and proceed with whatever is rendered
+        driver.set_page_load_timeout(180)  # Increased timeout
+        driver.set_script_timeout(90)
+        driver.implicitly_wait(30)
+        
+        logger.info(f"Loading URL: {url}")
+        
+        # Load page with retry mechanism
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                driver.execute_script("window.stop();")
-            except Exception:
-                pass
+                driver.get(url)
+                logger.info(f"Page loaded successfully on attempt {attempt + 1}")
+                break
+            except TimeoutException:
+                logger.warning(f"Timeout loading page, attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    try:
+                        driver.execute_script("window.stop();")
+                    except Exception:
+                        pass
+                    time.sleep(5)
+                else:
+                    logger.error("Failed to load page after all retries")
+                    return []
 
-        # Wait for either carousel or any epaper img
-        try:
-            WebDriverWait(driver, 40).until(
-                EC.any_of(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".carousel-inner img")),
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "img[src*='epaper']"))
-                )
-            )
-        except TimeoutException:
-            logger.warning("Timed out waiting for image elements")
-
-        # Give a brief settle time
-        time.sleep(2)
-
-        # Collect images
-        elems = driver.find_elements(By.CSS_SELECTOR, ".carousel-inner img, img[src*='epaper']")
-        urls: List[str] = []
+        # Wait for content with multiple selectors
+        wait = WebDriverWait(driver, 60)  # Increased wait time
+        
+        selectors_to_try = [
+            ".carousel-inner img",
+            "img[src*='epaper']",
+            "img[data-src*='epaper']",
+            ".epaper img",
+            ".page-image img",
+        ]
+        
+        elements_found = False
+        for selector in selectors_to_try:
+            try:
+                logger.info(f"Waiting for selector: {selector}")
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                elements_found = True
+                logger.info(f"Found elements with selector: {selector}")
+                break
+            except TimeoutException:
+                logger.warning(f"Timeout waiting for selector: {selector}")
+                continue
+        
+        if not elements_found:
+            logger.warning("No image elements found with any selector")
+            # Try to get page source to debug
+            page_source_snippet = driver.page_source[:1000] if driver.page_source else "No page source"
+            logger.info(f"Page source snippet: {page_source_snippet}")
+        
+        # Give additional time for dynamic content
+        time.sleep(10)  # Increased wait time
+        
+        # Try multiple selectors to collect images
+        all_selectors = [
+            ".carousel-inner img", 
+            "img[src*='epaper']", 
+            "img[data-src*='epaper']",
+            ".epaper img",
+            ".page-image img",
+            "img[src*='sandesh']"
+        ]
+        
+        urls = []
         seen = set()
-        for img in elems:
-            src = img.get_attribute("src")
-            if src and any(ext in src for ext in [".jpg", ".jpeg", ".png", ".webp"]):
-                if src not in seen:
-                    seen.add(src)
-                    urls.append(src)
+        
+        for selector in all_selectors:
+            try:
+                elems = driver.find_elements(By.CSS_SELECTOR, selector)
+                logger.info(f"Found {len(elems)} elements with selector: {selector}")
+                
+                for img in elems:
+                    src = None
+                    # Try different attributes
+                    for attr in ['src', 'data-src', 'data-lazy-src']:
+                        src = img.get_attribute(attr)
+                        if src:
+                            break
+                    
+                    if src and any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+                        if src not in seen:
+                            seen.add(src)
+                            urls.append(src)
+                            logger.info(f"Added image URL: {src}")
+                            
+            except Exception as e:
+                logger.warning(f"Error processing selector {selector}: {e}")
+                continue
+        
+        logger.info(f"Total unique image URLs found: {len(urls)}")
         return urls
-    except (WebDriverException, Exception) as e:
-        logger.error(f"Selenium fetch failed: {e}")
+        
+    except Exception as e:
+        logger.error(f"Selenium error: {e}")
+        logger.error(f"Chrome binary exists: {os.path.exists(chrome_bin)}")
+        logger.error(f"ChromeDriver exists: {os.path.exists(chromedriver_path)}")
         return []
     finally:
-        try:
-            if driver is not None:
+        if driver:
+            try:
                 driver.quit()
+                logger.info("Chrome driver closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing driver: {e}")
+        
+        # Force cleanup
+        try:
+            import psutil
+            for proc in psutil.process_iter(['pid', 'name']):
+                if 'chrome' in proc.info['name'].lower():
+                    proc.kill()
         except Exception:
             pass
 
