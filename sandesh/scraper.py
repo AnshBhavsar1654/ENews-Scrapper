@@ -10,7 +10,6 @@ import time
 import gc
 from typing import List, Optional
 import logging
-from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -18,7 +17,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
-from selenium.common.exceptions import TimeoutException
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -131,73 +129,18 @@ def extract_articles_with_gemini(image: Image.Image) -> list:
 
 def fetch_sandesh_page_image_urls(url_with_date: str) -> List[str]:
     """Fetch a Sandesh epaper landing page for any edition and collect all page image URLs in order using Selenium."""
-    # 1) Fast path: try to parse initial HTML without JS using requests
-    try:
-        logger.info("Attempting requests+BeautifulSoup parse for image URLs (no JS)...")
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Connection": "keep-alive",
-        }
-        resp = requests.get(url_with_date, headers=headers, timeout=20)
-        if resp.status_code == 200 and resp.text:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            # Prefer carousel images if present
-            imgs = soup.select('.carousel-inner .carousel-item img')
-            urls = []
-            seen = set()
-            for img in imgs:
-                src = img.get("src") or ""
-                if src and (".jpg" in src or ".jpeg" in src or ".png" in src):
-                    if src not in seen:
-                        seen.add(src)
-                        urls.append(src)
-            # If carousel empty, fallback to any images on page
-            if not urls:
-                for img in soup.find_all("img"):
-                    src = img.get("src") or ""
-                    if src and (".jpg" in src or ".jpeg" in src or ".png" in src):
-                        if src not in seen:
-                            seen.add(src)
-                            urls.append(src)
-            if urls:
-                logger.info(f"requests+BS4 collected {len(urls)} image URLs; skipping Selenium")
-                return urls
-        else:
-            logger.warning(f"requests fetch returned status {resp.status_code}")
-    except Exception as e:
-        logger.warning(f"requests+BS4 parse failed, will try Selenium: {e}")
-
-    # 2) Selenium path if requests path didn't find URLs
     # Setup Chrome options for headless mode
     chrome_options = Options()
     # Ensure Selenium uses the Chromium binary inside the container
     chrome_options.binary_location = os.getenv("CHROME_BIN", "/usr/bin/chromium")
-    # Faster page load; don't wait for all resources
-    try:
-        chrome_options.page_load_strategy = "eager"
-    except Exception:
-        pass
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-background-networking")
-    chrome_options.add_argument("--disable-default-apps")
-    chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--no-zygote")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--remote-debugging-port=9222")
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-    # Disable image loading to reduce memory and speed up page load
-    prefs = {"profile.managed_default_content_settings.images": 2}
-    chrome_options.add_experimental_option("prefs", prefs)
     
     driver = None
     try:
@@ -205,33 +148,25 @@ def fetch_sandesh_page_image_urls(url_with_date: str) -> List[str]:
         driver = webdriver.Chrome(options=chrome_options)
         
         logger.info(f"Loading page: {url_with_date}")
-        # Set strict timeouts to avoid hangs
-        driver.set_page_load_timeout(25)
-        driver.set_script_timeout(20)
-        try:
-            driver.get(url_with_date)
-        except TimeoutException:
-            logger.error("Page load timed out; proceeding with whatever is loaded")
+        driver.get(url_with_date)
         
         # Wait for the carousel to load
         logger.info("Waiting for carousel to load...")
-        try:
-            WebDriverWait(driver, 12).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".carousel-inner"))
-            )
-        except TimeoutException:
-            logger.warning("Carousel not found within timeout; attempting fallback selection of images")
-        # Brief additional wait; avoid long sleeps
-        time.sleep(0.5)
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ".carousel-inner"))
+        )
+        
+        # Additional wait for images to load
+        time.sleep(3)
         
         # Find all carousel items
         logger.info("Looking for carousel items...")
         carousel_items = driver.find_elements(By.CSS_SELECTOR, ".carousel-inner .carousel-item")
         logger.info(f"Found {len(carousel_items)} carousel items")
-
+        
         urls = []
         seen = set()
-
+        
         for idx, item in enumerate(carousel_items):
             try:
                 # Find img tag within this carousel item
@@ -254,22 +189,6 @@ def fetch_sandesh_page_image_urls(url_with_date: str) -> List[str]:
                     logger.info(f"No src attribute found in carousel item {idx + 1}")
             except Exception as e:
                 logger.error(f"Error processing carousel item {idx + 1}: {e}")
-
-        # Fallback: if no URLs via carousel, try any images on page
-        if not urls:
-            logger.info("Falling back to scanning all <img> tags on the page")
-            try:
-                imgs = driver.find_elements(By.TAG_NAME, "img")
-                logger.info(f"Found {len(imgs)} <img> tags on page")
-                for img in imgs:
-                    src = img.get_attribute("src")
-                    if src and (".jpg" in src or ".jpeg" in src or ".png" in src):
-                        if src not in seen:
-                            seen.add(src)
-                            urls.append(src)
-                logger.info(f"Fallback collected {len(urls)} image URLs")
-            except Exception as e:
-                logger.error(f"Fallback img scan failed: {e}")
         
         logger.info(f"Total valid image URLs found: {len(urls)}")
         return urls
