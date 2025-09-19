@@ -8,18 +8,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Install system dependencies including Chromium and Chromedriver for Selenium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
-    chromium-driver \
     fonts-liberation \
     libnss3 \
-    libgconf-2-4 \
     libasound2 \
-    curl \
     ca-certificates \
+    wget \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Helpful environment variables for Selenium/Chromium
-ENV CHROME_BIN=/usr/bin/chromium \
-    CHROMEDRIVER=/usr/bin/chromedriver
+ENV CHROME_BIN=/usr/bin/chromium
 
 # Create common symlinks some drivers/tools expect
 RUN ln -sf /usr/bin/chromium /usr/bin/chromium-browser && \

@@ -329,6 +329,8 @@ async def startup_event():
         from selenium.webdriver.chrome.options import Options
         
         chrome_options = Options()
+        # Ensure Selenium uses the Chromium binary installed in the container
+        chrome_options.binary_location = os.getenv("CHROME_BIN", "/usr/bin/chromium")
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")

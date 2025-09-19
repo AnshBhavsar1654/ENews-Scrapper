@@ -131,11 +131,15 @@ def fetch_sandesh_page_image_urls(url_with_date: str) -> List[str]:
     """Fetch a Sandesh epaper landing page for any edition and collect all page image URLs in order using Selenium."""
     # Setup Chrome options for headless mode
     chrome_options = Options()
+    # Ensure Selenium uses the Chromium binary inside the container
+    chrome_options.binary_location = os.getenv("CHROME_BIN", "/usr/bin/chromium")
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--remote-debugging-port=9222")
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
     
     driver = None
