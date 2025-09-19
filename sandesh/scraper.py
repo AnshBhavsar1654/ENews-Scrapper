@@ -16,6 +16,8 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 import google.generativeai as genai
 
@@ -160,19 +162,58 @@ def _fetch_image_urls_static(edition_slug: str, date_yyyy_mm_dd: str) -> List[st
 def _fetch_image_urls_selenium(edition_slug: str, date_yyyy_mm_dd: str) -> List[str]:
     """Use Selenium to extract page image URLs from dynamic Sandesh pages."""
     url = f"https://sandesh.com/epaper/{edition_slug}?date={date_yyyy_mm_dd}"
+    driver = None
     try:
+        # Resolve Chrome and Chromedriver paths (Render apt installs here)
+        chrome_bin = os.getenv("CHROME_BIN", "/usr/bin/chromium")
+        chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
+
         options = Options()
+        options.binary_location = chrome_bin
+        # Headless/CI friendly flags
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1920,1080")
         options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--disable-features=VizDisplayCompositor")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-infobars")
+        options.add_argument("--remote-debugging-port=9222")
         options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-        driver = webdriver.Chrome(options=options)
-        driver.get(url)
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".carousel-inner")))
-        time.sleep(3)
+        service = Service(executable_path=chromedriver_path)
+        driver = webdriver.Chrome(service=service, options=options)
+        # Timeouts
+        driver.set_page_load_timeout(120)
+        driver.set_script_timeout(60)
+
+        # Load page
+        try:
+            driver.get(url)
+        except TimeoutException:
+            # Stop loading and proceed with whatever is rendered
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+
+        # Wait for either carousel or any epaper img
+        try:
+            WebDriverWait(driver, 40).until(
+                EC.any_of(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".carousel-inner img")),
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "img[src*='epaper']"))
+                )
+            )
+        except TimeoutException:
+            logger.warning("Timed out waiting for image elements")
+
+        # Give a brief settle time
+        time.sleep(2)
+
+        # Collect images
         elems = driver.find_elements(By.CSS_SELECTOR, ".carousel-inner img, img[src*='epaper']")
         urls: List[str] = []
         seen = set()
@@ -182,15 +223,16 @@ def _fetch_image_urls_selenium(edition_slug: str, date_yyyy_mm_dd: str) -> List[
                 if src not in seen:
                     seen.add(src)
                     urls.append(src)
-        driver.quit()
         return urls
-    except Exception as e:
+    except (WebDriverException, Exception) as e:
         logger.error(f"Selenium fetch failed: {e}")
+        return []
+    finally:
         try:
-            driver.quit()
+            if driver is not None:
+                driver.quit()
         except Exception:
             pass
-        return []
 
 
 def fetch_sandesh_page_image_urls(edition_slug: str, date_yyyy_mm_dd: str) -> List[str]:
