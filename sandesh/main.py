@@ -1,356 +1,70 @@
+# main.py
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 import uuid
+import pandas as pd
 import os
-from datetime import datetime
-import time
-import psutil
-import logging
-from scraper import process_sandesh
+from scraper import process_sandesh_all_editions
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+app = FastAPI(title="E-paper Scraper API")
 
-app = FastAPI(
-    title="Newspaper Scraper API",
-    description="API for scraping Gujarati newspaper e-papers",
-    version="1.0.0"
-)
+# Store processing status (in production, use Redis or database)
+processing_status = {}
 
-# In-memory task storage
-task_store: Dict[str, Dict[str, Any]] = {}
-MAX_TASKS = 10
+class ProcessingRequest(BaseModel):
+    date: str
+    editions: Optional[List[str]] = None
 
-class ScrapeRequest(BaseModel):
-    date: Optional[str] = None
-    editions: List[str] = ["ahmedabad"]
-    max_pages: int = 5
+@app.post("/process")
+async def process_epaper(request: ProcessingRequest, background_tasks: BackgroundTasks):
+    job_id = str(uuid.uuid4())
+    processing_status[job_id] = {"status": "processing", "result": None, "error": None}
+    
+    # Run processing in background
+    background_tasks.add_task(process_task, job_id, request.date, request.editions)
+    
+    return {"job_id": job_id, "status": "started", "message": "Processing started"}
 
-class TaskStatus(BaseModel):
-    task_id: str
-    status: str
-    message: Optional[str] = None
-    progress: Optional[Dict[str, Any]] = None
-    result: Optional[List[Dict[str, Any]]] = None
-    error: Optional[str] = None
-    created_at: str
-    completed_at: Optional[str] = None
+@app.get("/status/{job_id}")
+async def get_status(job_id: str):
+    if job_id not in processing_status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return processing_status[job_id]
 
-# Global variable to track Chrome status
-chrome_initialized = False
+@app.get("/results/{job_id}")
+async def get_results(job_id: str):
+    if job_id not in processing_status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if processing_status[job_id]["status"] != "completed":
+        raise HTTPException(status_code=425, detail="Job still processing")
+    
+    return processing_status[job_id]["result"]
 
-def get_today_date() -> str:
-    """Return today's date in dd-mm-yyyy format"""
-    return datetime.now().strftime("%d-%m-%Y")
-
-def get_today_date_iso() -> str:
-    """Return today's date in YYYY-MM-DD format (for Sandesh)"""
-    return datetime.now().strftime("%Y-%m-%d")
-
-def check_memory_usage() -> float:
-    """Check current memory usage in MB"""
+def process_task(job_id: str, process_date: str, editions: List[str] = None):
     try:
-        process = psutil.Process(os.getpid())
-        return process.memory_info().rss / 1024 / 1024
-    except:
-        return 0
-
-def cleanup_old_tasks():
-    """Remove old tasks to prevent memory buildup"""
-    if len(task_store) > MAX_TASKS:
-        # Remove oldest tasks
-        oldest_tasks = sorted(task_store.items(), key=lambda x: x[1]['created_at'])[:len(task_store) - MAX_TASKS]
-        for task_id, _ in oldest_tasks:
-            del task_store[task_id]
-        logger.info(f"Cleaned up {len(oldest_tasks)} old tasks")
-
-@app.get("/")
-async def root():
-    return {
-        "message": "Newspaper Scraper API",
-        "status": "active",
-        "memory_usage": f"{check_memory_usage():.1f} MB",
-        "chrome_initialized": chrome_initialized
-    }
-
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "memory_usage_mb": check_memory_usage(),
-        "chrome_initialized": chrome_initialized
-    }
-
-@app.get("/chrome-status")
-async def chrome_status():
-    """Check if Chrome driver is initialized properly"""
-    return {
-        "chrome_initialized": chrome_initialized,
-        "status": "ready" if chrome_initialized else "not_ready",
-        "timestamp": datetime.now().isoformat()
-    }
-
-@app.post("/scrape/gujarat-samachar", response_model=TaskStatus)
-async def scrape_gujarat_samachar_endpoint(request: ScrapeRequest, background_tasks: BackgroundTasks):
-    # Check memory before starting
-    memory_usage = check_memory_usage()
-    if memory_usage > 400:  # 400MB threshold for 512MB RAM
-        raise HTTPException(status_code=429, detail="Server memory usage too high")
-    
-    # Generate task ID
-    task_id = str(uuid.uuid4())
-    date_str = request.date or get_today_date()
-    
-    # Validate editions
-    if not request.editions:
-        raise HTTPException(status_code=400, detail="At least one edition is required")
-    
-    # Store initial task status
-    task_store[task_id] = {
-        "status": "processing",
-        "message": f"Scraping started for {len(request.editions)} editions",
-        "progress": {
-            "editions_total": len(request.editions),
-            "editions_completed": 0,
-            "articles_extracted": 0
-        },
-        "created_at": datetime.now().isoformat(),
-        "params": {
-            "date": date_str,
-            "editions": request.editions,
-            "max_pages": request.max_pages
-        }
-    }
-    
-    # Clean up old tasks
-    cleanup_old_tasks()
-    
-    # Add background task
-    background_tasks.add_task(
-        process_gujarat_scraping_task,
-        task_id,
-        request.editions,
-        date_str,
-        request.max_pages
-    )
-    
-    return TaskStatus(
-        task_id=task_id,
-        status="started",
-        message=f"Scraping started for {len(request.editions)} editions on {date_str}",
-        created_at=task_store[task_id]["created_at"]
-    )
-
-@app.post("/scrape/sandesh", response_model=TaskStatus)
-async def scrape_sandesh_endpoint(request: ScrapeRequest, background_tasks: BackgroundTasks):
-    # Check if Chrome is initialized
-    if not chrome_initialized:
-        raise HTTPException(status_code=503, detail="Chrome driver not initialized. Please try again later.")
-    
-    # Check memory before starting
-    memory_usage = check_memory_usage()
-    if memory_usage > 400:  # 400MB threshold for 512MB RAM
-        raise HTTPException(status_code=429, detail="Server memory usage too high")
-    
-    # Generate task ID
-    task_id = str(uuid.uuid4())
-    date_str = request.date or get_today_date_iso()  # Use ISO format for Sandesh
-    
-    # Validate editions
-    if not request.editions:
-        raise HTTPException(status_code=400, detail="At least one edition is required")
-    
-    # Store initial task status
-    task_store[task_id] = {
-        "status": "processing",
-        "message": f"Scraping started for {len(request.editions)} editions",
-        "progress": {
-            "editions_total": len(request.editions),
-            "editions_completed": 0,
-            "articles_extracted": 0
-        },
-        "created_at": datetime.now().isoformat(),
-        "params": {
-            "date": date_str,
-            "editions": request.editions,
-            "max_pages": request.max_pages
-        }
-    }
-    
-    # Clean up old tasks
-    cleanup_old_tasks()
-    
-    # Add background task
-    background_tasks.add_task(
-        process_sandesh_scraping_task,
-        task_id,
-        request.editions,
-        date_str,
-        request.max_pages
-    )
-    
-    return TaskStatus(
-        task_id=task_id,
-        status="started",
-        message=f"Scraping started for {len(request.editions)} editions on {date_str}",
-        created_at=task_store[task_id]["created_at"]
-    )
-
-@app.get("/status/{task_id}", response_model=TaskStatus)
-async def get_task_status(task_id: str):
-    if task_id not in task_store:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    task_data = task_store[task_id]
-    return TaskStatus(
-        task_id=task_id,
-        status=task_data["status"],
-        message=task_data.get("message"),
-        progress=task_data.get("progress"),
-        result=task_data.get("result"),
-        error=task_data.get("error"),
-        created_at=task_data["created_at"],
-        completed_at=task_data.get("completed_at")
-    )
-
-@app.get("/tasks")
-async def list_tasks():
-    """List all active tasks"""
-    return {
-        "total_tasks": len(task_store),
-        "tasks": [
-            {
-                "task_id": task_id,
-                "status": data["status"],
-                "created_at": data["created_at"]
+        # Process the request
+        result = process_sandesh_all_editions(process_date, editions, None)
+        
+        # Convert to dictionary for JSON response
+        if result is not None:
+            processing_status[job_id] = {
+                "status": "completed", 
+                "result": result.to_dict(orient="records"),
+                "error": None
             }
-            for task_id, data in task_store.items()
-        ]
-    }
-
-def process_gujarat_scraping_task(task_id: str, editions: List[str], date_str: str, max_pages: int):
-    """Background task to process Gujarat Samachar scraping"""
-    try:
-        logger.info(f"Starting background task {task_id}")
-        
-        # Update progress
-        task_store[task_id]["progress"]["started_at"] = datetime.now().isoformat()
-        
-        # Process the scraping
-        df = process_gujarat_samachar(date_str, editions, max_pages)
-        
-        if df is not None:
-            result = df.to_dict(orient='records')
-            articles_count = len(result)
         else:
-            result = []
-            articles_count = 0
-        
-        # Update task status
-        task_store[task_id].update({
-            "status": "completed",
-            "message": f"Scraping completed successfully",
-            "progress": {
-                "editions_total": len(editions),
-                "editions_completed": len(editions),
-                "articles_extracted": articles_count,
-                "memory_usage_mb": check_memory_usage()
-            },
-            "result": result,
-            "completed_at": datetime.now().isoformat()
-        })
-        
-        logger.info(f"Task {task_id} completed with {articles_count} articles")
-        
+            processing_status[job_id] = {
+                "status": "completed", 
+                "result": [],
+                "error": "No data found for the specified date"
+            }
+            
     except Exception as e:
-        logger.error(f"Task {task_id} failed: {e}")
-        task_store[task_id].update({
-            "status": "failed",
-            "error": str(e),
-            "completed_at": datetime.now().isoformat()
-        })
-
-def process_sandesh_scraping_task(task_id: str, editions: List[str], date_str: str, max_pages: int):
-    """Background task to process Sandesh scraping"""
-    try:
-        logger.info(f"Starting background task {task_id} for Sandesh")
-        
-        # Update progress
-        task_store[task_id]["progress"]["started_at"] = datetime.now().isoformat()
-        
-        # Process the scraping
-        df = process_sandesh(date_str, editions, max_pages)
-        
-        if df is not None:
-            result = df.to_dict(orient='records')
-            articles_count = len(result)
-        else:
-            result = []
-            articles_count = 0
-        
-        # Update task status
-        task_store[task_id].update({
-            "status": "completed",
-            "message": f"Scraping completed successfully",
-            "progress": {
-                "editions_total": len(editions),
-                "editions_completed": len(editions),
-                "articles_extracted": articles_count,
-                "memory_usage_mb": check_memory_usage()
-            },
-            "result": result,
-            "completed_at": datetime.now().isoformat()
-        })
-        
-        logger.info(f"Task {task_id} completed with {articles_count} articles")
-        
-    except Exception as e:
-        logger.error(f"Task {task_id} failed: {e}")
-        task_store[task_id].update({
-            "status": "failed",
-            "error": str(e),
-            "completed_at": datetime.now().isoformat()
-        })
-
-# Add startup event to check environment and initialize Chrome
-@app.on_event("startup")
-async def startup_event():
-    global chrome_initialized
-    
-    logger.info("Starting Newspaper Scraper API")
-    logger.info(f"Memory usage: {check_memory_usage():.1f} MB")
-    
-    # Try to initialize Chrome for Sandesh
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        
-        chrome_options = Options()
-        # Ensure Selenium uses the Chromium binary installed in the container
-        chrome_options.binary_location = os.getenv("CHROME_BIN", "/usr/bin/chromium")
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        
-        # Try to initialize Chrome
-        driver = webdriver.Chrome(options=chrome_options)
-        driver.quit()
-        chrome_initialized = True
-        logger.info("Chrome driver initialized successfully")
-        
-    except Exception as e:
-        logger.error(f"Chrome initialization failed: {e}")
-        chrome_initialized = False
-    
-    if not os.getenv("GOOGLE_API_KEY"):
-        logger.warning("GOOGLE_API_KEY environment variable not set!")
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+        processing_status[job_id] = {
+            "status": "error", 
+            "result": None,
+            "error": str(e)
+        }
