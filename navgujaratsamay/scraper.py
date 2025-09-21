@@ -104,16 +104,15 @@ def _parse_date_from_navgujarat_url(issue_url: str) -> str:
     Returns ISO date 'YYYY-MM-DD' if possible, else ''.
     """
     try:
-        # Extract segment like 15-SEPT-2025
+        # Extract last path segment (e.g., '15-SEPT-2025' or '21092025')
         path = urlparse(issue_url).path
         parts = [p for p in path.split('/') if p]
-        # Typically: ['', '4056813', 'Ahmedabad', '15-SEPT-2025'] -> last part is date
         date_token = parts[-1] if parts else ''
-        # Handle cases where there isn't a date in path, fallback to fragment
-        if not re.search(r"\d{4}", date_token):
-            frag = urlparse(issue_url).fragment
-            date_token = frag
-        # Normalize month names
+        if not date_token:
+            # Fallback to fragment
+            date_token = urlparse(issue_url).fragment
+
+        # Case 1: Named month formats like 15-SEPT-2025
         month_map = {
             'JAN': 1, 'JANUARY': 1,
             'FEB': 2, 'FEBRUARY': 2,
@@ -129,16 +128,26 @@ def _parse_date_from_navgujarat_url(issue_url: str) -> str:
             'DEC': 12, 'DECEMBER': 12,
         }
         m = re.search(r"(\d{1,2})-([A-Za-z]+)-(\d{4})", date_token)
-        if not m:
-            return ""
-        day = int(m.group(1))
-        mon_name = m.group(2).upper()
-        year = int(m.group(3))
-        month = month_map.get(mon_name)
-        if not month:
-            return ""
-        dt = datetime(year, month, day)
-        return dt.strftime("%Y-%m-%d")
+        if m:
+            day = int(m.group(1))
+            mon_name = m.group(2).upper()
+            year = int(m.group(3))
+            month = month_map.get(mon_name)
+            if not month:
+                return ""
+            dt = datetime(year, month, day)
+            return dt.strftime("%Y-%m-%d")
+
+        # Case 2: Numeric DDMMYYYY like 21092025
+        m2 = re.search(r"^(\d{2})(\d{2})(\d{4})$", date_token)
+        if m2:
+            day = int(m2.group(1))
+            month = int(m2.group(2))
+            year = int(m2.group(3))
+            dt = datetime(year, month, day)
+            return dt.strftime("%Y-%m-%d")
+
+        return ""
     except Exception:
         return ""
 
