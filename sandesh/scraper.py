@@ -16,6 +16,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from urllib.parse import urlparse, parse_qs
+from selenium.webdriver.chrome.service import Service
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -130,17 +131,28 @@ def fetch_sandesh_page_image_urls(url_with_date: str) -> List[str]:
     """Fetch a Sandesh epaper landing page for any edition and collect all page image URLs in order using Selenium."""
     # Setup Chrome options for headless mode
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--disable-extensions')
+    chrome_options.add_argument('--disable-software-rasterizer')
+    chrome_options.add_argument('--remote-debugging-port=9222')
+    chrome_options.add_argument('--remote-debugging-address=0.0.0.0')
+    chrome_options.add_argument('--window-size=1280,1696')  # Small resolution
+    chrome_options.add_argument('--single-process')  # This can help with memory but may be less stable
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    # Explicitly set Chromium binary if provided (useful in Docker/Render)
+    chrome_bin = os.getenv("CHROME_BIN", "/usr/bin/chromium")
+    if os.path.exists(chrome_bin):
+        chrome_options.binary_location = chrome_bin
     
     driver = None
     try:
         logger.info("Initializing Chrome driver...")
-        driver = webdriver.Chrome(options=chrome_options)
+        chromedriver_path = os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")
+        service = Service(executable_path=chromedriver_path)
+        driver = webdriver.Chrome(service=service, options=chrome_options)
         
         logger.info(f"Loading page: {url_with_date}")
         driver.get(url_with_date)

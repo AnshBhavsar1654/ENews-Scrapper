@@ -327,6 +327,8 @@ async def startup_event():
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        import os
         
         chrome_options = Options()
         chrome_options.add_argument("--headless")
@@ -334,9 +336,15 @@ async def startup_event():
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
+        # Set binary location if provided (Docker/Render)
+        chrome_bin = os.getenv("CHROME_BIN", "/usr/bin/chromium")
+        if os.path.exists(chrome_bin):
+            chrome_options.binary_location = chrome_bin
         
         # Try to initialize Chrome
-        driver = webdriver.Chrome(options=chrome_options)
+        chromedriver_path = os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")
+        service = Service(executable_path=chromedriver_path)
+        driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.quit()
         chrome_initialized = True
         logger.info("Chrome driver initialized successfully")

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache/
+.venv/
+venv/
+.env
+
+# VCS
+.git/
+.gitignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data/Artifacts
+*.log
+*.csv
+*.parquet
+*.xlsx
+
+# Node/Front-end (if any)
+node_modules/
+
+# Docker build cache
+*.tar
