@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration (env-driven for production)
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyA2CkFU6O3eI7CGj1B60naPfZybuncpKx4")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
 if GOOGLE_API_KEY:
@@ -127,68 +127,16 @@ def extract_articles_with_gemini(image: Image.Image) -> list:
         logger.error(f"Gemini API error: {e}")
         return []
 
-def _parse_date_from_navgujarat_url(issue_url: str) -> str:
-    """Parse date from a NavGujarat Samay issue URL.
-    Supports both formats: 15-SEPT-2025 and 21092025 (DDMMYYYY)
-    Returns ISO date 'YYYY-MM-DD' if possible, else ''.
-    """
-    try:
-        # Extract last path segment (e.g., '15-SEPT-2025' or '21092025')
-        path = urlparse(issue_url).path
-        parts = [p for p in path.split('/') if p]
-        date_token = parts[-1] if parts else ''
-        if not date_token:
-            # Fallback to fragment
-            date_token = urlparse(issue_url).fragment
-
-        # Case 1: Named month formats like 15-SEPT-2025
-        month_map = {
-            'JAN': 1, 'JANUARY': 1,
-            'FEB': 2, 'FEBRUARY': 2,
-            'MAR': 3, 'MARCH': 3,
-            'APR': 4, 'APRIL': 4,
-            'MAY': 5,
-            'JUN': 6, 'JUNE': 6,
-            'JUL': 7, 'JULY': 7,
-            'AUG': 8, 'AUGUST': 8,
-            'SEP': 9, 'SEPT': 9, 'SEPTEMBER': 9,
-            'OCT': 10, 'OCTOBER': 10,
-            'NOV': 11, 'NOVEMBER': 11,
-            'DEC': 12, 'DECEMBER': 12,
-        }
-        m = re.search(r"(\d{1,2})-([A-Za-z]+)-(\d{4})", date_token)
-        if m:
-            day = int(m.group(1))
-            mon_name = m.group(2).upper()
-            year = int(m.group(3))
-            month = month_map.get(mon_name)
-            if not month:
-                return ""
-            dt = datetime(year, month, day)
-            return dt.strftime("%Y-%m-%d")
-
-        # Case 2: Numeric DDMMYYYY like 21092025
-        m2 = re.search(r"^(\d{2})(\d{2})(\d{4})$", date_token)
-        if m2:
-            day = int(m2.group(1))
-            month = int(m2.group(2))
-            year = int(m2.group(3))
-            dt = datetime(year, month, day)
-            return dt.strftime("%Y-%m-%d")
-
-        return ""
-    except Exception:
-        return ""
 
 def get_ahmedabad_edition_url(base_url: str = "https://epaper.navgujaratsamay.com/") -> Optional[str]:
-    """Extract the Ahmedabad edition URL from the main page dynamically."""
+    """Extract the Ahmedabad edition URL from the main page dynamically and follow redirects."""
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1280,1696")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebDriver/537.36")
     
     # Explicit binary locations (Docker/Render friendly)
     chrome_bin = os.getenv("CHROME_BIN", "/usr/bin/chromium")
@@ -221,8 +169,18 @@ def get_ahmedabad_edition_url(base_url: str = "https://epaper.navgujaratsamay.co
         href = edition_link.get_attribute("href")
         
         if href:
-            logger.info(f"Found edition URL: {href}")
-            return href
+            logger.info(f"Found redirect URL: {href}")
+            
+            # Follow the redirect to get the actual issue URL
+            logger.info("Following redirect to get actual issue URL...")
+            driver.get(href)
+            
+            # Wait for redirect and get final URL
+            time.sleep(3)  # Allow time for any redirects
+            final_url = driver.current_url
+            
+            logger.info(f"Final issue URL after redirect: {final_url}")
+            return final_url
         else:
             logger.error("No href found in edition card")
             return None
@@ -314,8 +272,8 @@ def fetch_navgujarat_page_image_urls(issue_url: str, max_pages: int = 18, wait_s
         if driver:
             driver.quit()
 
-def process_navgujarat_single_page(img_url: str, date_str: str, page_num: int) -> List[dict]:
-    """Process a single page and return articles"""
+def process_navgujarat_single_page(img_url: str, page_num: int) -> List[dict]:
+    """Process a single page and return articles (date will be added by Apps Script)"""
     try:
         logger.info(f"Processing page {page_num}, image: {img_url}")
         image = load_image_optimized(img_url)
@@ -325,11 +283,10 @@ def process_navgujarat_single_page(img_url: str, date_str: str, page_num: int) -
         del image
         gc.collect()
         
-        # Format results
+        # Format results (no date field - Apps Script will add it)
         formatted_articles = []
         for article in articles:
             formatted_articles.append({
-                "date": date_str,
                 "page_number": page_num,
                 "edition": "ahmedabad",  # Only Ahmedabad edition supported
                 "city": article.get("city", ""),
@@ -355,6 +312,7 @@ def process_navgujarat_ahmedabad(
     """Process NavGujarat Samay (Ahmedabad) issue and extract articles per page.
     
     If issue_url is None, will automatically get today's edition from main page.
+    Date column will be empty - Apps Script will add the date.
     """
     # If no issue URL provided, get it from main page
     if not issue_url:
@@ -363,11 +321,6 @@ def process_navgujarat_ahmedabad(
         if not issue_url:
             logger.error("Failed to get edition URL from main page")
             return None
-    
-    if not date_yyyy_mm_dd:
-        date_yyyy_mm_dd = _parse_date_from_navgujarat_url(issue_url) or ""
-    if not date_yyyy_mm_dd:
-        logger.warning("Could not parse date from URL; 'date' column will be empty.")
 
     logger.info("Starting NavGujarat Samay (Ahmedabad) extraction...")
     logger.info(f"Issue URL: {issue_url}")
@@ -379,7 +332,7 @@ def process_navgujarat_ahmedabad(
 
     all_articles = []
     for page_num, img_url in enumerate(page_img_urls, start=1):
-        articles = process_navgujarat_single_page(img_url, date_yyyy_mm_dd, page_num)
+        articles = process_navgujarat_single_page(img_url, page_num)
         if articles:
             all_articles.extend(articles)
         # Small delay between pages
@@ -389,9 +342,9 @@ def process_navgujarat_ahmedabad(
         logger.warning("No data collected for the given issue.")
         return None
 
-    # Create DataFrame with optimized memory usage
+    # Create DataFrame with optimized memory usage (no date column)
     columns = [
-        "date", "page_number", "edition", "city", "district", 
+        "page_number", "edition", "city", "district", 
         "media_link", "news_paper_name", "headline", "content", "sentiment"
     ]
     
@@ -400,6 +353,6 @@ def process_navgujarat_ahmedabad(
     return df
 
 # Public API function
-def process_navgujarat(issue_url: Optional[str] = None, date_yyyy_mm_dd: Optional[str] = None, max_pages: int = 18) -> Optional[pd.DataFrame]:
+def process_navgujarat(issue_url: Optional[str] = None, max_pages: int = 18) -> Optional[pd.DataFrame]:
     """Main function to process NavGujarat Samay newspaper (Ahmedabad edition only)."""
-    return process_navgujarat_ahmedabad(issue_url, date_yyyy_mm_dd, max_pages)
+    return process_navgujarat_ahmedabad(issue_url, max_pages)
