@@ -117,7 +117,6 @@ async def scrape_navgujarat_endpoint(request: ScrapeRequest, background_tasks: B
         process_navgujarat_task,
         task_id,
         request.issue_url,
-        request.date,
         request.max_pages,
     )
 
