@@ -160,12 +160,12 @@ async def list_tasks():
         ]
     }
 
-def process_navgujarat_task(task_id: str, issue_url: Optional[str], date: Optional[str], max_pages: int):
+def process_navgujarat_task(task_id: str, issue_url: Optional[str], max_pages: int):
     try:
         logger.info(f"Starting task {task_id} for NavGujarat Samay")
         task_store[task_id]["progress"]["started_at"] = datetime.now().isoformat()
 
-        df = process_navgujarat(issue_url=issue_url, date_yyyy_mm_dd=date, max_pages=max_pages)
+        df = process_navgujarat(issue_url=issue_url, max_pages=max_pages)
         if df is not None:
             result = df.to_dict(orient='records')
             articles_count = len(result)

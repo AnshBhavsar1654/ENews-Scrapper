@@ -306,7 +306,6 @@ def process_navgujarat_single_page(img_url: str, page_num: int) -> List[dict]:
 
 def process_navgujarat_ahmedabad(
     issue_url: Optional[str] = None,
-    date_yyyy_mm_dd: Optional[str] = None,
     max_pages: int = 18,
 ) -> Optional[pd.DataFrame]:
     """Process NavGujarat Samay (Ahmedabad) issue and extract articles per page.
