@@ -22,8 +22,5 @@ Thumbs.db
 *.parquet
 *.xlsx
 
-# Node/Front-end (if any)
-node_modules/
-
 # Docker build cache
 *.tar

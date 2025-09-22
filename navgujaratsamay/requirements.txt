@@ -9,3 +9,4 @@ python-dotenv==1.0.0
 psutil==5.9.6
 selenium==4.15.2
 numpy==1.26.4
+webdriver-manager==4.0.1

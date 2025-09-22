@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="NavGujarat Samay Scraper API",
-    description="API for scraping NavGujarat Samay e-paper",
+    description="API for scraping NavGujarat Samay e-paper (Ahmedabad edition only)",
     version="1.0.0"
 )
 
@@ -23,9 +23,9 @@ task_store: Dict[str, Dict[str, Any]] = {}
 MAX_TASKS = 10
 
 class ScrapeRequest(BaseModel):
-    issue_url: str
+    issue_url: Optional[str] = None  # If None, will get today's edition from main page
     date: Optional[str] = None  # YYYY-MM-DD; optional as we can parse from issue URL
-    max_pages: int = 10
+    max_pages: int = 18
 
 class TaskStatus(BaseModel):
     task_id: str
@@ -60,7 +60,8 @@ async def root():
         "message": "NavGujarat Samay Scraper API",
         "status": "active",
         "memory_usage": f"{check_memory_usage():.1f} MB",
-        "chrome_initialized": chrome_initialized
+        "chrome_initialized": chrome_initialized,
+        "supported_editions": ["ahmedabad"]
     }
 
 @app.get("/health")
@@ -91,9 +92,12 @@ async def scrape_navgujarat_endpoint(request: ScrapeRequest, background_tasks: B
 
     task_id = str(uuid.uuid4())
 
+    # Determine source type for logging
+    source_type = "main_page" if not request.issue_url else "direct_url"
+    
     task_store[task_id] = {
         "status": "processing",
-        "message": f"Scraping started",
+        "message": f"Scraping started from {source_type}",
         "progress": {
             "pages_processed": 0,
             "articles_extracted": 0
@@ -102,7 +106,8 @@ async def scrape_navgujarat_endpoint(request: ScrapeRequest, background_tasks: B
         "params": {
             "issue_url": request.issue_url,
             "date": request.date,
-            "max_pages": request.max_pages
+            "max_pages": request.max_pages,
+            "source_type": source_type
         }
     }
 
@@ -119,7 +124,7 @@ async def scrape_navgujarat_endpoint(request: ScrapeRequest, background_tasks: B
     return TaskStatus(
         task_id=task_id,
         status="started",
-        message=f"Scraping started",
+        message=f"Scraping started from {source_type}",
         created_at=task_store[task_id]["created_at"]
     )
 
@@ -139,12 +144,28 @@ async def get_task_status(task_id: str):
         completed_at=data.get("completed_at")
     )
 
-def process_navgujarat_task(task_id: str, issue_url: str, date: Optional[str], max_pages: int):
+@app.get("/tasks")
+async def list_tasks():
+    """List all active tasks"""
+    return {
+        "total_tasks": len(task_store),
+        "tasks": [
+            {
+                "task_id": task_id,
+                "status": data["status"],
+                "created_at": data["created_at"],
+                "source_type": data.get("params", {}).get("source_type", "unknown")
+            }
+            for task_id, data in task_store.items()
+        ]
+    }
+
+def process_navgujarat_task(task_id: str, issue_url: Optional[str], date: Optional[str], max_pages: int):
     try:
         logger.info(f"Starting task {task_id} for NavGujarat Samay")
         task_store[task_id]["progress"]["started_at"] = datetime.now().isoformat()
 
-        df = process_navgujarat(issue_url, date_yyyy_mm_dd=date, max_pages=max_pages)
+        df = process_navgujarat(issue_url=issue_url, date_yyyy_mm_dd=date, max_pages=max_pages)
         if df is not None:
             result = df.to_dict(orient='records')
             articles_count = len(result)
@@ -183,6 +204,7 @@ async def startup_event():
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
 
         chrome_options = Options()
         chrome_options.add_argument("--headless")
@@ -195,8 +217,14 @@ async def startup_event():
         if os.path.exists(chrome_bin):
             chrome_options.binary_location = chrome_bin
 
-        chromedriver_path = os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")
-        service = Service(executable_path=chromedriver_path)
+        # Prefer system chromedriver; fallback to webdriver-manager on local dev
+        chromedriver_path = os.getenv("CHROMEDRIVER")
+        if chromedriver_path and os.path.exists(chromedriver_path):
+            service = Service(executable_path=chromedriver_path)
+        else:
+            driver_path = ChromeDriverManager().install()
+            service = Service(executable_path=driver_path)
+
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.quit()
         chrome_initialized = True
